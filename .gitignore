@@ -3,4 +3,5 @@ task.md
 __pycache__/
 *.pyc
 .venv/
+starter-kit-python/agent-metrics.log
 
