@@ -2,14 +2,143 @@ import argparse
 import os
 import sys
 import time
+from collections import deque
 
 from client import ConsiditionClient
 
 def should_move_on_to_next_tick(response):
     return True
 
+LOW_SOC_THRESHOLD = 0.5
+HIGH_SOC_THRESHOLD = 0.9
+
+
+def build_graph(map_obj):
+    nodes = map_obj.get("nodes", []) or []
+    edges = map_obj.get("edges", []) or []
+    node_lookup = {node.get("id"): node for node in nodes if node.get("id")}
+    adjacency = {node_id: set() for node_id in node_lookup}
+
+    for edge in edges:
+        frm = edge.get("fromNode")
+        to = edge.get("toNode")
+        if frm and to:
+            adjacency.setdefault(frm, set()).add(to)
+            adjacency.setdefault(to, set()).add(frm)
+
+    chargers = {}
+    for node_id, node in node_lookup.items():
+        target = node.get("target") or {}
+        if target.get("Type") == "ChargingStation":
+            chargers[node_id] = {
+                "available": max(0, int(target.get("amountOfAvailableChargers") or 0)),
+                "speed": target.get("chargeSpeedPerCharger") or 0,
+            }
+
+    return node_lookup, adjacency, chargers
+
+
+def customer_soc(customer):
+    charge_remaining = customer.get("chargeRemaining") or 0
+    max_charge = customer.get("maxCharge") or 0
+    if max_charge <= 0:
+        return 0.0
+    return max(0.0, min(1.0, charge_remaining / max_charge))
+
+
+def is_stationary(customer):
+    return customer.get("state") not in {"Traveling", "TransitioningToEdge"}
+
+
+def find_nearest_available_charger(start_node, adjacency, chargers):
+    if start_node in chargers and chargers[start_node]["available"] > 0:
+        return start_node
+
+    visited = {start_node}
+    queue = deque([start_node])
+
+    while queue:
+        node_id = queue.popleft()
+        for neighbor in adjacency.get(node_id, []):
+            if neighbor in visited:
+                continue
+            if neighbor in chargers and chargers[neighbor]["available"] > 0:
+                return neighbor
+            visited.add(neighbor)
+            queue.append(neighbor)
+    return None
+
+
+def add_recommendation(per_customer, customer_id, node_id, charge_to):
+    bucket = per_customer.setdefault(customer_id, [])
+    bucket.append({"nodeId": node_id, "chargeTo": min(1.0, max(0.0, charge_to))})
+
+
+def add_charge_recommendations(node_id, node, chargers, per_customer):
+    available = chargers[node_id]["available"]
+    if available <= 0:
+        return
+
+    customers = sorted(node.get("customers") or [], key=customer_soc)
+    for customer in customers:
+        if available <= 0:
+            break
+        if not is_stationary(customer):
+            continue
+        soc = customer_soc(customer)
+        if soc >= HIGH_SOC_THRESHOLD:
+            continue
+        target_soc = 1.0 if customer.get("persona") != "CostSensitive" else 0.9
+        add_recommendation(
+            per_customer,
+            customer["id"],
+            node_id,
+            max(target_soc, soc + 0.2),
+        )
+        available -= 1
+
+    chargers[node_id]["available"] = available
+
+
+def reroute_low_soc_customers(node_id, node, adjacency, chargers, per_customer):
+    for customer in node.get("customers") or []:
+        if not is_stationary(customer):
+            continue
+        soc = customer_soc(customer)
+        if soc > LOW_SOC_THRESHOLD:
+            continue
+        target_node = find_nearest_available_charger(node_id, adjacency, chargers)
+        if not target_node:
+            continue
+        target_soc = 0.95 if customer.get("persona") != "CostSensitive" else 0.85
+        add_recommendation(per_customer, customer["id"], target_node, target_soc)
+        chargers[target_node]["available"] -= 1
+
+
 def generate_customer_recommendations(map_obj, current_tick):
-    return []
+    node_lookup, adjacency, chargers = build_graph(map_obj)
+    if not node_lookup or not chargers:
+        return []
+
+    per_customer = {}
+
+    for node_id, node in node_lookup.items():
+        if node_id not in chargers:
+            continue
+        add_charge_recommendations(node_id, node, chargers, per_customer)
+
+    for node_id, node in node_lookup.items():
+        if node_id in chargers:
+            continue
+        reroute_low_soc_customers(node_id, node, adjacency, chargers, per_customer)
+
+    return [
+        {
+            "customerId": customer_id,
+            "chargingRecommendations": entries,
+        }
+        for customer_id, entries in per_customer.items()
+    ]
 
 def generate_tick(map_obj, current_tick):
     return {
