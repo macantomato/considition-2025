@@ -1,10 +1,8 @@
 import argparse
-import json
 import os
 import sys
 import time
 from collections import deque
-from pathlib import Path
 
 from client import ConsiditionClient
 
@@ -13,12 +11,6 @@ def should_move_on_to_next_tick(response):
 
 LOW_SOC_THRESHOLD = 0.5
 HIGH_SOC_THRESHOLD = 0.9
-LOG_PATH = Path(__file__).resolve().parent / "agent-metrics.log"
-
-AGENT_STATE = {
-    "customers": {},
-    "tick_metrics": [],
-}
 
 
 def build_graph(map_obj):
@@ -128,7 +120,6 @@ def generate_customer_recommendations(map_obj, current_tick):
     if not node_lookup or not chargers:
         return []
 
-    refresh_customer_state(node_lookup, current_tick)
     per_customer = {}
 
     for node_id, node in node_lookup.items():
@@ -148,47 +139,6 @@ def generate_customer_recommendations(map_obj, current_tick):
         }
         for customer_id, entries in per_customer.items()
     ]
-
-
-def refresh_customer_state(node_lookup, current_tick):
-    customers_state = AGENT_STATE["customers"]
-    for node_id, node in node_lookup.items():
-        for customer in node.get("customers") or []:
-            entry = customers_state.setdefault(customer["id"], {})
-            entry.update(
-                {
-                    "last_tick": current_tick,
-                    "last_node": node_id,
-                    "persona": customer.get("persona"),
-                    "state": customer.get("state"),
-                    "soc": customer_soc(customer),
-                }
-            )
-
-
-def log_tick_metrics(tick_index, response):
-    summary = {
-        "tick": tick_index,
-        "score": response.get("score", 0),
-        "customerCompletionScore": response.get("customerCompletionScore", 0),
-        "kwhRevenue": response.get("kwhRevenue", 0),
-        "failures": [],
-    }
-
-    for customer in response.get("customerLogs", []) or []:
-        logs = customer.get("logs") or []
-        if logs:
-            final_state = logs[-1].get("state")
-            if final_state in {"RanOutOfJuice", "Aborted"}:
-                summary["failures"].append(customer.get("customerId"))
-
-    AGENT_STATE["tick_metrics"].append(summary)
-
-    try:
-        with LOG_PATH.open("a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(summary) + "\n")
-    except OSError:
-        pass
 
 def generate_tick(map_obj, current_tick):
     return {
@@ -276,8 +226,6 @@ def main():
                 + game_response.get("kwhRevenue", 0)
                 + game_response.get("score", 0)
             )
-
-            log_tick_metrics(i, game_response)
 
             if should_move_on_to_next_tick(game_response):
                 good_ticks.append(current_tick)
