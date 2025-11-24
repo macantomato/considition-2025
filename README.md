@@ -1,2 +1,2 @@
 # considition-2025
-Hackathon considiontion 2025
+Hackathon considition 2025
